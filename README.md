@@ -14,10 +14,11 @@ a background model load so clients can connect while weights are still arriving.
 
 | File | Purpose |
 | --- | --- |
-| `airllm-ollama-api.py` | The API. Runs standalone (`python airllm-ollama-api.py`) or under systemd. |
-| `airllm-olllama-api-install.sh` | Installs to `/opt/airllm-ollama-api` in a venv and registers the service. |
+| `airllm_ollama_api.py` | The API. Runs standalone (`python airllm_ollama_api.py`) or under systemd. |
+| `airllm-ollama-api-install.sh` | Installs to `/opt/airllm-ollama-api` in a venv and registers the service. |
 | `requirements.txt` | Pinned floor versions for the inference and HTTP stack. |
-| `env.example` | Every setting, with defaults and notes. |
+| `env.example` | Every setting, with defaults and notes. Copy to `.env`. |
+| `.gitignore` | Keeps `.env` (which holds `HF_TOKEN`), caches and shards out of git. |
 | `tests/` | Fast tests against a stubbed model — no weights downloaded. |
 
 ## Install
@@ -25,14 +26,14 @@ a background model load so clients can connect while weights are still arriving.
 ```bash
 git clone <this repo> && cd airllm-openai-api-wrapper
 cp env.example .env       # edit before serving anything real
-./airllm-olllama-api-install.sh
+./airllm-ollama-api-install.sh
 ```
 
 That registers **`airllm-ollama-api.service`**, installed under
 `/opt/airllm-ollama-api`. `systemctl status airllm-ollama-api` describes it as
 "Ollama-compatible HTTP API served by AirLLM" with the port it's listening on,
 so it's unambiguous next to a real `ollama.service`. Override either name with
-`SERVICE_NAME=... APP_DIR=... ./airllm-olllama-api-install.sh`.
+`SERVICE_NAME=... APP_DIR=... ./airllm-ollama-api-install.sh`.
 
 ```bash
 systemctl status airllm-ollama-api      # what it is, and whether it's up
@@ -40,7 +41,7 @@ journalctl -u airllm-ollama-api -f      # model load progress and requests
 sudo systemctl restart airllm-ollama-api
 ```
 
-`airllm-olllama-api-install.sh` refuses to run as root, checks that systemd is actually running,
+`airllm-ollama-api-install.sh` refuses to run as root, checks that systemd is actually running,
 warns if `ollama.service` already owns port 11434, builds a virtualenv, verifies
 every module imports, and only then writes and starts the unit. Re-running is
 safe — it refreshes code and dependencies and leaves your `.env` alone.
@@ -50,7 +51,7 @@ To run it without systemd:
 ```bash
 python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
 set -a; source .env; set +a
-./venv/bin/python airllm-ollama-api.py
+./venv/bin/python airllm_ollama_api.py
 ```
 
 ## Configure
@@ -129,8 +130,8 @@ pytest -q
 ```
 
 `tests/fakes.py` injects stand-in `airllm` and `transformers` modules before
-`airllm-ollama-api.py` is imported, so the suite runs in about a second and downloads
-nothing. That works only because `airllm-ollama-api.py` imports both lazily — if someone
+`airllm_ollama_api.py` is imported, so the suite runs in about a second and downloads
+nothing. That works only because `airllm_ollama_api.py` imports both lazily — if someone
 hoists those imports to module scope, the tests fail immediately, on purpose.
 
 The suite covers packet shapes for both endpoints in both modes, the chat
@@ -152,5 +153,7 @@ time, and that abandoning a stream actually cancels the model.
 - The unit uses `Restart=on-failure` with `StartLimitBurst=5`, so a
   misconfiguration (bad model ID, missing token) stops after five attempts
   instead of re-downloading weights forever.
+- **`.env` is gitignored and `env.example` is not.** The token lives in
+  `.env`; the template is the tracked file. Don't rename either.
 - **WSL**: systemd is off unless you set `systemd=true` under `[boot]` in
-  `/etc/wsl.conf` and run `wsl --shutdown`. `airllm-olllama-api-install.sh` checks and tells you.
+  `/etc/wsl.conf` and run `wsl --shutdown`. `airllm-ollama-api-install.sh` checks and tells you.
