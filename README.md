@@ -17,14 +17,14 @@ a background model load so clients can connect while weights are still arriving.
 | `airllm-ollama-api.py` | The API. Runs standalone (`python airllm-ollama-api.py`) or under systemd. |
 | `airllm-olllama-api-install.sh` | Installs to `/opt/airllm-ollama-api` in a venv and registers the service. |
 | `requirements.txt` | Pinned floor versions for the inference and HTTP stack. |
-| `.env.example` | Every setting, with defaults and notes. |
+| `env.example` | Every setting, with defaults and notes. |
 | `tests/` | Fast tests against a stubbed model — no weights downloaded. |
 
 ## Install
 
 ```bash
 git clone <this repo> && cd airllm-openai-api-wrapper
-cp .env.example .env      # edit before serving anything real
+cp env.example .env       # edit before serving anything real
 ./airllm-olllama-api-install.sh
 ```
 
@@ -55,7 +55,7 @@ set -a; source .env; set +a
 
 ## Configure
 
-Everything is environment variables; `.env.example` is the full list. The four
+Everything is environment variables; `env.example` is the full list. The four
 that matter most:
 
 - **`AIRLLM_MODEL_ID`** — defaults to `Qwen/Qwen2.5-3B-Instruct`. Start there.

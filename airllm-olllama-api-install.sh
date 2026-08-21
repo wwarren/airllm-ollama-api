@@ -80,7 +80,7 @@ if ! command -v systemctl >/dev/null 2>&1 || [[ ! -d /run/systemd/system ]]; the
   die "systemd is not running. On WSL, enable it with 'systemd=true' under [boot] in /etc/wsl.conf, then 'wsl --shutdown'."
 fi
 
-for required in "$APP_ENTRYPOINT" requirements.txt .env.example; do
+for required in "$APP_ENTRYPOINT" requirements.txt env.example; do
   [[ -f "$REPO_DIR/$required" ]] || die "$required not found next to airllm-olllama-api-install.sh"
 done
 
@@ -95,7 +95,7 @@ sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$APP_DIR"
 step 2 "Copying application files"
 install -m 0644 "$REPO_DIR/$APP_ENTRYPOINT" "$APP_DIR/$APP_ENTRYPOINT"
 install -m 0644 "$REPO_DIR/requirements.txt" "$APP_DIR/requirements.txt"
-install -m 0644 "$REPO_DIR/.env.example" "$APP_DIR/.env.example"
+install -m 0644 "$REPO_DIR/env.example" "$APP_DIR/env.example"
 if [[ -f "$REPO_DIR/README.md" ]]; then
   install -m 0644 "$REPO_DIR/README.md" "$APP_DIR/README.md"
 fi
@@ -106,7 +106,7 @@ elif [[ -f "$REPO_DIR/.env" ]]; then
   install -m 0600 "$REPO_DIR/.env" "$APP_DIR/.env"
   echo "  copied .env from the repo"
 else
-  install -m 0600 "$REPO_DIR/.env.example" "$APP_DIR/.env"
+  install -m 0600 "$REPO_DIR/env.example" "$APP_DIR/.env"
   sed -i -E "s|^HF_HOME=.*|HF_HOME=${APP_DIR}/hf-cache|" "$APP_DIR/.env"
   echo "  created $APP_DIR/.env from the example — edit it before serving a real model"
 fi

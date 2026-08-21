@@ -3,7 +3,7 @@
 Speaks enough of the Ollama wire protocol that Open WebUI, LiteLLM, and
 anything else expecting an Ollama endpoint can point at it unchanged.
 
-Configuration is entirely through environment variables; see .env.example.
+Configuration is entirely through environment variables; see env.example.
 """
 
 from __future__ import annotations
