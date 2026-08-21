@@ -1,7 +1,7 @@
 """Stand-ins for airllm and transformers so the wrapper can be tested fast.
 
-Both are injected into sys.modules before airllm-ollama-api.py is imported. That only
-works because airllm-ollama-api.py imports them lazily inside functions — if someone
+Both are injected into sys.modules before airllm_ollama_api.py is imported. That only
+works because airllm_ollama_api.py imports them lazily inside functions — if someone
 moves those imports to module scope, these tests fail loudly, which is the
 point.
 """

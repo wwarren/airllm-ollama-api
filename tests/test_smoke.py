@@ -7,7 +7,7 @@ No weights are downloaded; airllm and transformers are faked (see fakes.py).
 from __future__ import annotations
 
 import asyncio
-import importlib.util
+import importlib
 import json
 import os
 import sys
@@ -45,15 +45,9 @@ def build(fail_with=None, chat_template="present", **env):
     model = fakes.FakeModel(tokenizer, fail_with=fail_with)
     fakes.install(model)
 
-    module_name = "airllm_ollama_api"
-    sys.modules.pop(module_name, None)
-    spec = importlib.util.spec_from_file_location(
-        module_name, Path(__file__).resolve().parent.parent / "airllm-ollama-api.py"
-    )
-    assert spec is not None and spec.loader is not None
-    server = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = server
-    spec.loader.exec_module(server)
+    # Plain import now that the module name is a valid identifier.
+    sys.modules.pop("airllm_ollama_api", None)
+    server = importlib.import_module("airllm_ollama_api")
     return server, model
 
 
