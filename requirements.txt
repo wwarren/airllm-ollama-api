@@ -1,0 +1,19 @@
+# Core inference stack
+airllm>=2.11.0
+transformers>=4.44.0
+torch>=2.2.0
+accelerate>=0.30.0
+huggingface-hub>=0.24.0
+safetensors>=0.4.3
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+
+# HTTP layer
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.6.0
+
+# Only needed if you set AIRLLM_COMPRESSION=4bit or 8bit.
+# bitsandbytes is CUDA-first; verify it works on your CPU-only host before
+# relying on it.
+# bitsandbytes>=0.43.0
