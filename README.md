@@ -41,10 +41,30 @@ journalctl -u airllm-ollama-api -f      # model load progress and requests
 sudo systemctl restart airllm-ollama-api
 ```
 
-`airllm-ollama-api-install.sh` refuses to run as root, checks that systemd is actually running,
-warns if `ollama.service` already owns port 11434, builds a virtualenv, verifies
-every module imports, and only then writes and starts the unit. Re-running is
-safe — it refreshes code and dependencies and leaves your `.env` alone.
+It runs either as a normal user with `sudo`, or directly as root — which is
+what you want inside a container. When it detects root it skips `sudo`
+entirely; if the service would then also run as root it says so, since the API
+has no authentication. Give it a dedicated account instead with
+`SERVICE_USER=airllm ./airllm-ollama-api-install.sh`.
+
+Before touching anything it checks that systemd is actually running, warns if
+`ollama.service` already owns port 11434, builds a virtualenv, and verifies
+every module imports. Re-running is safe — it refreshes code and dependencies
+and leaves your `.env` alone.
+
+The last step verifies the install rather than assuming it worked: it confirms
+the unit is active, polls `/api/version` until the HTTP server answers (up to
+60s), prints `/health` so you can see whether the weights are still loading,
+and shows `systemctl status`. If any of that fails it dumps the last 40 journal
+lines and exits non-zero.
+
+```
+[7/7] Verifying the service
+  unit is active
+  waiting for the API on 127.0.0.1:11434 
+  /api/version -> {"version":"0.32.15"}
+  /health      -> {"status":"loading", ...}
+```
 
 To run it without systemd:
 
@@ -82,15 +102,21 @@ sharded copy AirLLM writes, and by default all of it lands in `~/.cache`.
 | `GET /api/tags` | One model, the configured one. `format` is `safetensors`, not `gguf`. |
 | `POST /api/show` | Model metadata and capabilities. |
 | `GET /api/ps` | Empty until loaded, then one entry with `size_vram: 0`. |
+| `POST /api/pull` | Accepts the configured model name or alias and starts the background load. |
 | `POST /api/chat` | Streaming NDJSON or `"stream": false`. |
 | `POST /api/generate` | Same, with `raw` to skip chat templating. |
 | `POST /api/embeddings`, `/api/embed` | `501` — AirLLM's layer swapping doesn't serve embeddings. |
+| `POST /api/create`, `/api/copy`, `/api/push`, `/api/delete` | `501` — one configured AirLLM model per process. |
 | `GET /health` | Non-Ollama. Load status, device, and the load error if there was one. |
 
 Response packets carry `created_at`, `done_reason`, and the full set of
 `*_count` / `*_duration` fields, because LiteLLM builds its usage numbers from
 `prompt_eval_count` and `eval_count`, and expects `message` on *every* chat
 packet including the final one.
+
+Requests naming any model other than `AIRLLM_MODEL_ID`, `AIRLLM_MODEL_ALIAS`,
+or their implicit `:latest` forms return `404`. Omitting `model` keeps the
+single-model convenience path for lightweight clients and tests.
 
 ### Client setup
 
@@ -117,7 +143,8 @@ Set `AIRLLM_MODEL_ALIAS` if you want a shorter name in the model picker.
   requests are serialized behind a lock. A second request waits; it does not
   corrupt the first.
 - **No model switching.** One process serves one model. `/api/pull`,
-  `/api/create`, `/api/delete` are not implemented — there's nothing to pull.
+  `/api/create`, `/api/delete` are compatibility shims; they do not change the
+  configured model.
 - **No tool calling or embeddings.**
 - **No OpenAI `/v1/*` routes.** Point an OpenAI-shaped client at LiteLLM or
   Open WebUI in front of this, and let it do the translation.
@@ -155,5 +182,7 @@ time, and that abandoning a stream actually cancels the model.
   instead of re-downloading weights forever.
 - **`.env` is gitignored and `env.example` is not.** The token lives in
   `.env`; the template is the tracked file. Don't rename either.
+- **Containers**: run the installer as root. It needs systemd as PID 1 —
+  a plain `docker run` image without an init won't work.
 - **WSL**: systemd is off unless you set `systemd=true` under `[boot]` in
   `/etc/wsl.conf` and run `wsl --shutdown`. `airllm-ollama-api-install.sh` checks and tells you.

@@ -542,6 +542,36 @@ class ShowRequest(BaseModel):
     name: Optional[str] = None
 
 
+class ModelRequest(BaseModel):
+    model: Optional[str] = None
+    name: Optional[str] = None
+    stream: bool = True
+
+
+def model_names() -> set:
+    names = {cfg.model_id, cfg.public_name}
+    names.update(f"{name}:latest" for name in list(names) if ":" not in name)
+    return {name for name in names if name}
+
+
+def requested_model_name(*values: Optional[str]) -> Optional[str]:
+    for value in values:
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def assert_known_model(*values: Optional[str]) -> None:
+    requested = requested_model_name(*values)
+    if requested is None:
+        return
+    if requested not in model_names():
+        raise HTTPException(
+            status_code=404,
+            detail=f"model {requested!r} is not served by this AirLLM process",
+        )
+
+
 def resolve_options(options: Dict[str, Any]) -> tuple:
     """Translate Ollama `options` into transformers generate() kwargs."""
     max_new_tokens = cfg.max_new_tokens
@@ -690,6 +720,7 @@ async def ps() -> Dict[str, Any]:
 
 @app.post("/api/show")
 async def show(req: ShowRequest) -> Dict[str, Any]:
+    assert_known_model(req.model, req.name)
     return {
         "modelfile": f"FROM {cfg.model_id}",
         "parameters": f"num_ctx {cfg.max_seq_len}\nnum_predict {cfg.max_new_tokens}",
@@ -706,6 +737,7 @@ async def show(req: ShowRequest) -> Dict[str, Any]:
 
 @app.post("/api/chat")
 async def chat(req: ChatRequest, request: Request):
+    assert_known_model(req.model)
     if req.tools:
         log.warning("tool calling is unsupported; ignoring %d tool definitions", len(req.tools))
 
@@ -731,6 +763,8 @@ async def chat(req: ChatRequest, request: Request):
 
 @app.post("/api/generate")
 async def generate(req: GenerateRequest, request: Request):
+    assert_known_model(req.model)
+
     def start() -> Generation:
         manager.require()
         prompt = prompt_for_generate(req)
@@ -757,6 +791,45 @@ async def embeddings() -> JSONResponse:
     return JSONResponse(
         status_code=501,
         content={"error": "embeddings are not supported by the AirLLM wrapper"},
+    )
+
+
+@app.post("/api/pull")
+async def pull(req: ModelRequest) -> Any:
+    assert_known_model(req.model, req.name)
+    if not manager.ready:
+        manager.load_in_background()
+
+    if not req.stream:
+        return {"status": "success"}
+
+    async def body() -> AsyncIterator[str]:
+        for status in ("pulling manifest", "verifying sha256 digest", "success"):
+            yield json.dumps({"status": status}) + "\n"
+
+    return StreamingResponse(body(), media_type="application/x-ndjson")
+
+
+@app.post("/api/create")
+@app.post("/api/copy")
+@app.post("/api/push")
+async def unsupported_model_write() -> JSONResponse:
+    return JSONResponse(
+        status_code=501,
+        content={
+            "error": "this AirLLM wrapper serves one configured Hugging Face model; "
+            "Ollama model creation, copying, and pushing are not supported"
+        },
+    )
+
+
+@app.delete("/api/delete")
+@app.post("/api/delete")
+async def delete(req: ModelRequest) -> JSONResponse:
+    assert_known_model(req.model, req.name)
+    return JSONResponse(
+        status_code=501,
+        content={"error": "the configured AirLLM model cannot be deleted through this API"},
     )
 
 
