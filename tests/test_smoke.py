@@ -75,7 +75,7 @@ def test_metadata_endpoints_answer_before_the_model_loads():
         assert entry["details"]["format"] == "safetensors"
         assert entry["details"]["parameter_size"] == "7B"
 
-        show = client.post("/api/show", json={"model": "fake"}).json()
+        show = client.post("/api/show", json={"model": "fake/Test-7B-Instruct"}).json()
         for key in ("modelfile", "parameters", "template", "details", "capabilities"):
             assert key in show, f"/api/show is missing {key}"
 
@@ -99,6 +99,67 @@ def test_embeddings_are_refused_clearly():
         assert client.post("/api/embed", json={"input": "x"}).status_code == 501
 
 
+def test_unknown_model_requests_are_rejected():
+    server, _ = build(AIRLLM_EAGER_LOAD="false")
+    with TestClient(server.app) as client:
+        response = client.post(
+            "/api/generate",
+            json={"model": "not-the-configured-model", "prompt": "hi", "stream": False},
+        )
+    assert response.status_code == 404
+    assert "not-the-configured-model" in response.json()["detail"]
+
+
+def test_model_alias_and_latest_tag_are_accepted():
+    server, _ = build(AIRLLM_MODEL_ALIAS="local-airllm", AIRLLM_EAGER_LOAD="false")
+    with TestClient(server.app) as client:
+        assert client.post("/api/show", json={"model": "local-airllm"}).status_code == 200
+        assert (
+            client.post("/api/show", json={"model": "local-airllm:latest"}).status_code
+            == 200
+        )
+        assert (
+            client.post("/api/show", json={"model": "fake/Test-7B-Instruct"}).status_code
+            == 200
+        )
+
+
+def test_pull_reports_success_for_the_configured_model_without_blocking_on_load():
+    server, _ = build(AIRLLM_EAGER_LOAD="false")
+    with TestClient(server.app) as client:
+        packets = ndjson(client.post("/api/pull", json={"model": "fake/Test-7B-Instruct"}))
+        once = client.post(
+            "/api/pull", json={"model": "fake/Test-7B-Instruct", "stream": False}
+        ).json()
+
+    assert packets[-1] == {"status": "success"}
+    assert once == {"status": "success"}
+
+
+def test_unsupported_model_management_routes_are_explicit():
+    server, _ = build(AIRLLM_EAGER_LOAD="false")
+    with TestClient(server.app) as client:
+        assert (
+            client.post("/api/create", json={"model": "fake/Test-7B-Instruct"}).status_code
+            == 501
+        )
+        assert (
+            client.post("/api/copy", json={"source": "a", "destination": "b"}).status_code
+            == 501
+        )
+        assert (
+            client.post("/api/push", json={"model": "fake/Test-7B-Instruct"}).status_code
+            == 501
+        )
+        assert (
+            client.post("/api/delete", json={"model": "fake/Test-7B-Instruct"}).status_code
+            == 501
+        )
+        assert client.request(
+            "DELETE", "/api/delete", json={"model": "fake/Test-7B-Instruct"}
+        ).status_code == 501
+
+
 # --------------------------------------------------------------------------
 # Chat
 # --------------------------------------------------------------------------
@@ -110,7 +171,7 @@ def test_chat_stream_packet_shapes():
         packets = ndjson(
             client.post(
                 "/api/chat",
-                json={"model": "fake", "messages": [{"role": "user", "content": "hi"}]},
+                json={"model": "fake/Test-7B-Instruct", "messages": [{"role": "user", "content": "hi"}]},
             )
         )
 
@@ -136,7 +197,7 @@ def test_chat_non_stream_matches_the_stream_and_never_echoes_the_prompt():
     server, _ = build()
     with TestClient(server.app) as client:
         payload = {
-            "model": "fake",
+            "model": "fake/Test-7B-Instruct",
             "messages": [{"role": "user", "content": "unique-prompt-marker"}],
             "stream": False,
         }
@@ -154,7 +215,7 @@ def test_chat_uses_the_tokenizer_template_and_asks_for_a_generation_prompt():
         client.post(
             "/api/chat",
             json={
-                "model": "fake",
+                "model": "fake/Test-7B-Instruct",
                 "messages": [
                     {"role": "system", "content": "be nice"},
                     {"role": "user", "content": "hi"},
@@ -169,7 +230,7 @@ def test_manual_template_is_lowercase_and_has_a_bos_token():
     server, model = build(chat_template=None)
     with TestClient(server.app) as client:
         client.post(
-            "/api/chat", json={"model": "fake", "messages": [{"role": "USER", "content": "hi"}]}
+            "/api/chat", json={"model": "fake/Test-7B-Instruct", "messages": [{"role": "USER", "content": "hi"}]}
         )
     prompt = model.tokenizer.last_call["text"]
     assert prompt.startswith("<|begin_of_text|>")
@@ -186,9 +247,9 @@ def test_manual_template_is_lowercase_and_has_a_bos_token():
 def test_generate_stream_and_non_stream():
     server, _ = build()
     with TestClient(server.app) as client:
-        packets = ndjson(client.post("/api/generate", json={"model": "fake", "prompt": "hi"}))
+        packets = ndjson(client.post("/api/generate", json={"model": "fake/Test-7B-Instruct", "prompt": "hi"}))
         once = client.post(
-            "/api/generate", json={"model": "fake", "prompt": "hi", "stream": False}
+            "/api/generate", json={"model": "fake/Test-7B-Instruct", "prompt": "hi", "stream": False}
         ).json()
 
     assert "".join(p["response"] for p in packets[:-1]) == "".join(fakes.FakeModel.REPLY)
@@ -264,7 +325,7 @@ def test_unknown_client_fields_do_not_400():
         response = client.post(
             "/api/chat",
             json={
-                "model": "fake",
+                "model": "fake/Test-7B-Instruct",
                 "messages": [{"role": "user", "content": "hi", "images": None}],
                 "keep_alive": "5m",
                 "format": "json",
