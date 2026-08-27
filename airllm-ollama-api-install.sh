@@ -3,7 +3,8 @@
 # Install the airllm-ollama-api service: an Ollama-compatible HTTP API
 # served by AirLLM.
 #
-# Run from the repository root as your normal user (not root):
+# Run from the repository root, either as a normal user with sudo or as root
+# (e.g. inside a container):
 #     ./airllm-ollama-api-install.sh
 #
 # Re-running is safe: it refreshes the code and dependencies and leaves an
@@ -20,6 +21,11 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 APP_ENTRYPOINT="airllm_ollama_api.py"
 
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+# Run a command with privilege: directly when already root (containers),
+# through sudo otherwise.
+as_root() {
+  if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi
+}
 step() { printf '\n[%s/%s] %s\n' "$1" "$TOTAL_STEPS" "$2"; }
 read_env_value() {
   local file="$1"
@@ -57,17 +63,20 @@ port_is_listening() {
   command -v ss >/dev/null 2>&1 || return 1
   ss -H -ltn "( sport = :$PORT )" 2>/dev/null | grep -q .
 }
-TOTAL_STEPS=6
+TOTAL_STEPS=7
 
 trap 'die "failed on line $LINENO"' ERR
 
 # --- preflight -------------------------------------------------------------
 
 if [[ $EUID -eq 0 ]]; then
-  die "run as your normal user, not root — the script calls sudo where it needs to"
+  RUNNING_AS_ROOT=1
+  SUDO_HINT=""
+else
+  RUNNING_AS_ROOT=0
+  SUDO_HINT="sudo "
+  command -v sudo >/dev/null 2>&1 || die "sudo is required when not running as root"
 fi
-
-command -v sudo >/dev/null 2>&1 || die "sudo is required"
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "$PYTHON_BIN not found"
 "$PYTHON_BIN" -c 'import venv' >/dev/null 2>&1 \
   || die "the venv module is missing — install python3-venv (apt install python3-venv)"
@@ -80,7 +89,15 @@ id -u "$SERVICE_USER" >/dev/null 2>&1 || die "SERVICE_USER does not exist: $SERV
 SERVICE_GROUP="${SERVICE_GROUP:-$(id -gn "$SERVICE_USER")}"
 validate_name "SERVICE_GROUP" "$SERVICE_GROUP"
 validate_app_dir
-sudo -v
+
+if (( RUNNING_AS_ROOT == 0 )); then
+  sudo -v || die "sudo authentication failed"
+fi
+if [[ "$SERVICE_USER" == "root" ]]; then
+  echo "WARNING: the service will run as root. It has no authentication, so keep"
+  echo "         AIRLLM_HOST=127.0.0.1 or firewall the port. To use a dedicated"
+  echo "         account instead: SERVICE_USER=airllm ./airllm-ollama-api-install.sh"
+fi
 
 if ! command -v systemctl >/dev/null 2>&1 || [[ ! -d /run/systemd/system ]]; then
   die "systemd is not running. On WSL, enable it with 'systemd=true' under [boot] in /etc/wsl.conf, then 'wsl --shutdown'."
@@ -93,8 +110,8 @@ done
 # --- 1. directories --------------------------------------------------------
 
 step 1 "Creating $APP_DIR"
-sudo mkdir -p "$APP_DIR"
-sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$APP_DIR"
+as_root mkdir -p "$APP_DIR"
+as_root chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$APP_DIR"
 
 # --- 2. application files --------------------------------------------------
 
@@ -159,7 +176,7 @@ PYCHECK
 # --- 5. systemd unit -------------------------------------------------------
 
 step 5 "Writing /etc/systemd/system/${SERVICE_NAME}.service"
-sudo tee "/etc/systemd/system/${SERVICE_NAME}.service" >/dev/null <<SERVICE_EOF
+as_root tee "/etc/systemd/system/${SERVICE_NAME}.service" >/dev/null <<SERVICE_EOF
 [Unit]
 Description=airllm-ollama-api — Ollama-compatible HTTP API served by AirLLM on port ${PORT}
 Documentation=file://${APP_DIR}/README.md
@@ -198,17 +215,78 @@ SERVICE_EOF
 # --- 6. start --------------------------------------------------------------
 
 step 6 "Enabling and starting the service"
-sudo systemctl daemon-reload
-sudo systemctl enable "${SERVICE_NAME}.service"
-sudo systemctl restart "${SERVICE_NAME}.service"
+as_root systemctl daemon-reload
+as_root systemctl enable "${SERVICE_NAME}.service"
+as_root systemctl restart "${SERVICE_NAME}.service"
+
+# --- 7. verify -------------------------------------------------------------
+
+step 7 "Verifying the service"
+
+HOST="$(read_env_value "$APP_DIR/.env" AIRLLM_HOST || true)"
+PROBE_HOST="${HOST:-127.0.0.1}"
+if [[ "$PROBE_HOST" == "0.0.0.0" || "$PROBE_HOST" == "::" ]]; then
+  PROBE_HOST=127.0.0.1
+fi
+
+if (( RUNNING_AS_ROOT == 1 )); then
+  JOURNAL="journalctl -u ${SERVICE_NAME}.service"
+else
+  JOURNAL="sudo journalctl -u ${SERVICE_NAME}.service"
+fi
+
+show_failure() {
+  echo
+  echo "--- systemctl status ${SERVICE_NAME} ---"
+  as_root systemctl status "${SERVICE_NAME}.service" --no-pager --lines=0 || true
+  echo
+  echo "--- last 40 log lines ---"
+  as_root journalctl -u "${SERVICE_NAME}.service" -n 40 --no-pager || true
+  echo
+  echo "Follow the log with: ${JOURNAL} -f"
+}
 
 sleep 3
 if ! systemctl is-active --quiet "${SERVICE_NAME}.service"; then
-  echo
-  echo "The service is not running. Last 40 log lines:"
-  sudo journalctl -u "${SERVICE_NAME}.service" -n 40 --no-pager || true
+  echo "  ${SERVICE_NAME}.service is NOT active."
+  show_failure
   exit 1
 fi
+echo "  unit is active"
+
+# The HTTP port binds before the model finishes loading, so /api/version
+# answers almost immediately. Anything slower than this means real trouble.
+probe() {
+  "$APP_DIR/venv/bin/python" -c '
+import sys, urllib.request
+print(urllib.request.urlopen(
+    "http://%s:%s%s" % (sys.argv[1], sys.argv[2], sys.argv[3]), timeout=3
+).read().decode()[:400])' "$PROBE_HOST" "$PORT" "$1"
+}
+
+printf '  waiting for the API on %s:%s ' "$PROBE_HOST" "$PORT"
+API_UP=0
+for _ in $(seq 1 30); do
+  if probe /api/version >/dev/null 2>&1; then
+    API_UP=1
+    break
+  fi
+  printf '.'
+  sleep 2
+done
+echo
+
+if (( API_UP == 0 )); then
+  echo "  the API did not answer within 60s"
+  show_failure
+  exit 1
+fi
+
+echo "  /api/version -> $(probe /api/version)"
+echo "  /health      -> $(probe /health)"
+echo
+echo "--- systemctl status ${SERVICE_NAME} ---"
+as_root systemctl status "${SERVICE_NAME}.service" --no-pager --lines=0 || true
 
 cat <<DONE
 
@@ -216,17 +294,18 @@ cat <<DONE
 ${SERVICE_NAME}.service is running on port ${PORT}
 (Ollama-compatible HTTP API served by AirLLM).
 
-The model loads in the background — the API answers
-/api/version and /api/tags immediately, and returns 503 on
-/api/chat until the weights are ready.
+The model loads in the background. /api/version and
+/api/tags answer now; /api/chat returns 503 until the
+weights are ready — /health reports which.
 
-  Load status : curl -s localhost:${PORT}/health
-  Live logs   : journalctl -u ${SERVICE_NAME}.service -f
-  Smoke test  : curl -s localhost:${PORT}/api/chat -d '{
-                  "model":"local","messages":[{"role":"user","content":"hi"}]
-                }'
+  Check the service : systemctl status ${SERVICE_NAME}
+  Follow the log    : ${JOURNAL} -f
+  Load status       : curl -s ${PROBE_HOST}:${PORT}/health
+  Smoke test        : curl -s ${PROBE_HOST}:${PORT}/api/chat -d '{
+                        "model":"local","messages":[{"role":"user","content":"hi"}]
+                      }'
 
 Config lives in ${APP_DIR}/.env — edit it and run
-'sudo systemctl restart ${SERVICE_NAME}' to apply changes.
+'${SUDO_HINT}systemctl restart ${SERVICE_NAME}' to apply changes.
 =========================================================
 DONE

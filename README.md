@@ -15,6 +15,7 @@ a background model load so clients can connect while weights are still arriving.
 | File | Purpose |
 | --- | --- |
 | `airllm_ollama_api.py` | The API. Runs standalone (`python airllm_ollama_api.py`) or under systemd. |
+| `airllm-system-install.sh` | One-shot Linux host bootstrap: OS packages, service user, caches, then API install. |
 | `airllm-ollama-api-install.sh` | Installs to `/opt/airllm-ollama-api` in a venv and registers the service. |
 | `requirements.txt` | Pinned floor versions for the inference and HTTP stack. |
 | `env.example` | Every setting, with defaults and notes. Copy to `.env`. |
@@ -24,10 +25,22 @@ a background model load so clients can connect while weights are still arriving.
 ## Install
 
 ```bash
-git clone <this repo> && cd airllm-openai-api-wrapper
+git clone <this repo> && cd airllm-ollama-api
 cp env.example .env       # edit before serving anything real
 ./airllm-ollama-api-install.sh
 ```
+
+On a fresh Linux host, run the system bootstrapper instead:
+
+```bash
+./airllm-system-install.sh
+```
+
+It installs Python/build tools with the detected package manager, creates a
+dedicated `airllm` service account, prepares `HF_HOME` and
+`AIRLLM_LAYER_SHARDS_PATH` under `/opt/airllm-ollama-api`, then runs
+`airllm-ollama-api-install.sh`. Override paths and names the same way:
+`APP_DIR=... SERVICE_USER=... ./airllm-system-install.sh`.
 
 That registers **`airllm-ollama-api.service`**, installed under
 `/opt/airllm-ollama-api`. `systemctl status airllm-ollama-api` describes it as
