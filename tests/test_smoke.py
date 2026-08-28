@@ -61,6 +61,17 @@ def ndjson(response):
 # --------------------------------------------------------------------------
 
 
+def test_default_model_is_qwen_72b_instruct():
+    for key in list(os.environ):
+        if key.startswith("AIRLLM_"):
+            del os.environ[key]
+    fakes.install(fakes.FakeModel(fakes.FakeTokenizer()))
+    sys.modules.pop("airllm_ollama_api", None)
+    server = importlib.import_module("airllm_ollama_api")
+
+    assert server.cfg.model_id == "Qwen/Qwen2.5-72B-Instruct"
+
+
 def test_metadata_endpoints_answer_before_the_model_loads():
     server, _ = build(AIRLLM_EAGER_LOAD="false")
     with TestClient(server.app) as client:
