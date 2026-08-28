@@ -19,6 +19,9 @@ SERVICE_GROUP="${SERVICE_GROUP:-}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 APP_ENTRYPOINT="airllm_ollama_api.py"
+INSTALL_CUDA_TORCH="${INSTALL_CUDA_TORCH:-auto}"
+INSTALL_BITSANDBYTES="${INSTALL_BITSANDBYTES:-auto}"
+TORCH_CUDA_INDEX_URL="${TORCH_CUDA_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
 # Run a command with privilege: directly when already root (containers),
@@ -62,6 +65,64 @@ validate_port() {
 port_is_listening() {
   command -v ss >/dev/null 2>&1 || return 1
   ss -H -ltn "( sport = :$PORT )" 2>/dev/null | grep -q .
+}
+nvidia_gpu_detected() {
+  command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1
+}
+install_cuda_torch_if_available() {
+  case "$INSTALL_CUDA_TORCH" in
+    auto|1|true|yes) ;;
+    0|false|no)
+      echo "  skipping CUDA torch install because INSTALL_CUDA_TORCH=$INSTALL_CUDA_TORCH"
+      return
+      ;;
+    *)
+      die "INSTALL_CUDA_TORCH must be auto, 1, or 0; got: $INSTALL_CUDA_TORCH"
+      ;;
+  esac
+
+  if ! nvidia_gpu_detected; then
+    echo "  no NVIDIA GPU detected; keeping the torch package from requirements.txt"
+    return
+  fi
+
+  echo "  NVIDIA GPU detected:"
+  nvidia-smi -L | sed 's/^/    /'
+  echo "  installing CUDA-enabled torch from $TORCH_CUDA_INDEX_URL"
+  "$APP_DIR/venv/bin/pip" install --upgrade torch --index-url "$TORCH_CUDA_INDEX_URL"
+  "$APP_DIR/venv/bin/python" - <<'PYCHECK'
+import torch
+print("  torch:", torch.__version__)
+print("  cuda build:", torch.version.cuda)
+print("  cuda available:", torch.cuda.is_available())
+if not torch.cuda.is_available():
+    raise SystemExit("CUDA torch installed, but torch.cuda.is_available() is false")
+PYCHECK
+}
+install_bitsandbytes_if_requested() {
+  case "$INSTALL_BITSANDBYTES" in
+    auto|1|true|yes) ;;
+    0|false|no)
+      echo "  skipping bitsandbytes install because INSTALL_BITSANDBYTES=$INSTALL_BITSANDBYTES"
+      return
+      ;;
+    *)
+      die "INSTALL_BITSANDBYTES must be auto, 1, or 0; got: $INSTALL_BITSANDBYTES"
+      ;;
+  esac
+
+  if [[ "$INSTALL_BITSANDBYTES" == "auto" ]] && ! nvidia_gpu_detected; then
+    echo "  no NVIDIA GPU detected; skipping bitsandbytes in auto mode"
+    return
+  fi
+
+  echo "  installing bitsandbytes"
+  "$APP_DIR/venv/bin/pip" install --upgrade bitsandbytes
+  "$APP_DIR/venv/bin/python" - <<'PYCHECK'
+import importlib.metadata
+import bitsandbytes
+print("  bitsandbytes:", importlib.metadata.version("bitsandbytes"))
+PYCHECK
 }
 TOTAL_STEPS=7
 
@@ -131,6 +192,9 @@ elif [[ -f "$REPO_DIR/.env" ]]; then
 else
   install -m 0600 "$REPO_DIR/env.example" "$APP_DIR/.env"
   sed -i -E "s|^HF_HOME=.*|HF_HOME=${APP_DIR}/hf-cache|" "$APP_DIR/.env"
+  if nvidia_gpu_detected; then
+    sed -i -E "s|^[#[:space:]]*AIRLLM_DEVICE=.*|AIRLLM_DEVICE=cuda:0|" "$APP_DIR/.env"
+  fi
   echo "  created $APP_DIR/.env from the example — edit it before serving a real model"
 fi
 
@@ -159,6 +223,8 @@ if [[ ! -x "$APP_DIR/venv/bin/python" ]]; then
 fi
 "$APP_DIR/venv/bin/pip" install --upgrade pip wheel >/dev/null
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt"
+install_cuda_torch_if_available
+install_bitsandbytes_if_requested
 
 # --- 4. import check -------------------------------------------------------
 
@@ -264,6 +330,21 @@ print(urllib.request.urlopen(
 ).read().decode()[:400])' "$PROBE_HOST" "$PORT" "$1"
 }
 
+start_model_download() {
+  "$APP_DIR/venv/bin/python" -c '
+import json, sys, urllib.request
+url = "http://%s:%s/api/pull" % (sys.argv[1], sys.argv[2])
+payload = json.dumps({"model": sys.argv[3], "stream": False}).encode()
+request = urllib.request.Request(
+    url,
+    data=payload,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+print(urllib.request.urlopen(request, timeout=10).read().decode()[:400])' \
+    "$PROBE_HOST" "$PORT" "$MODEL_ID"
+}
+
 printf '  waiting for the API on %s:%s ' "$PROBE_HOST" "$PORT"
 API_UP=0
 for _ in $(seq 1 30); do
@@ -283,6 +364,10 @@ if (( API_UP == 0 )); then
 fi
 
 echo "  /api/version -> $(probe /api/version)"
+MODEL_ID="$(read_env_value "$APP_DIR/.env" AIRLLM_MODEL_ID || true)"
+MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-72B-Instruct}"
+echo "  initiating model download/sharding for $MODEL_ID"
+echo "  /api/pull    -> $(start_model_download)"
 echo "  /health      -> $(probe /health)"
 echo
 echo "--- systemctl status ${SERVICE_NAME} ---"
@@ -294,9 +379,9 @@ cat <<DONE
 ${SERVICE_NAME}.service is running on port ${PORT}
 (Ollama-compatible HTTP API served by AirLLM).
 
-The model loads in the background. /api/version and
-/api/tags answer now; /api/chat returns 503 until the
-weights are ready — /health reports which.
+The model download/sharding has been initiated in the background.
+/api/version and /api/tags answer now; /api/chat returns 503 until
+the weights are ready — /health reports which.
 
   Check the service : systemctl status ${SERVICE_NAME}
   Follow the log    : ${JOURNAL} -f

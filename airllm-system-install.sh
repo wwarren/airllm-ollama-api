@@ -17,7 +17,9 @@ SERVICE_USER="${SERVICE_USER:-airllm}"
 SERVICE_GROUP="${SERVICE_GROUP:-$SERVICE_USER}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 INSTALL_API_SERVICE="${INSTALL_API_SERVICE:-1}"
-INSTALL_BITSANDBYTES="${INSTALL_BITSANDBYTES:-0}"
+INSTALL_CUDA_TORCH="${INSTALL_CUDA_TORCH:-auto}"
+INSTALL_BITSANDBYTES="${INSTALL_BITSANDBYTES:-auto}"
+TORCH_CUDA_INDEX_URL="${TORCH_CUDA_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 TOTAL_STEPS=6
@@ -28,14 +30,6 @@ note() { printf '  %s\n' "$*"; }
 
 as_root() {
   if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi
-}
-
-as_service_user() {
-  if [[ $EUID -eq 0 ]]; then
-    runuser -u "$SERVICE_USER" -- "$@"
-  else
-    sudo -u "$SERVICE_USER" "$@"
-  fi
 }
 
 validate_name() {
@@ -61,26 +55,26 @@ install_packages() {
   if command -v apt-get >/dev/null 2>&1; then
     as_root apt-get update
     as_root apt-get install -y \
-      ca-certificates curl git build-essential pkg-config \
+      ca-certificates curl git build-essential cmake pkg-config \
       "$PYTHON_BIN" python3-venv python3-pip
   elif command -v dnf >/dev/null 2>&1; then
     as_root dnf install -y \
-      ca-certificates curl git gcc gcc-c++ make pkgconf-pkg-config \
+      ca-certificates curl git gcc gcc-c++ make cmake pkgconf-pkg-config \
       "$PYTHON_BIN" python3-pip
   elif command -v yum >/dev/null 2>&1; then
     as_root yum install -y \
-      ca-certificates curl git gcc gcc-c++ make pkgconfig \
+      ca-certificates curl git gcc gcc-c++ make cmake pkgconfig \
       "$PYTHON_BIN" python3-pip
   elif command -v zypper >/dev/null 2>&1; then
     as_root zypper --non-interactive install \
-      ca-certificates curl git gcc gcc-c++ make pkg-config \
+      ca-certificates curl git gcc gcc-c++ make cmake pkg-config \
       "$PYTHON_BIN" python3-pip python3-virtualenv
   elif command -v pacman >/dev/null 2>&1; then
     as_root pacman -Sy --needed --noconfirm \
-      ca-certificates curl git base-devel python python-pip
+      ca-certificates curl git base-devel cmake python python-pip
   elif command -v apk >/dev/null 2>&1; then
     as_root apk add --no-cache \
-      ca-certificates curl git build-base pkgconfig python3 py3-pip
+      ca-certificates curl git build-base cmake pkgconfig python3 py3-pip
   else
     die "no supported package manager found (apt, dnf, yum, zypper, pacman, apk)"
   fi
@@ -114,6 +108,16 @@ append_env_if_missing() {
   if ! grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "$file"; then
     printf '%s=%s\n' "$key" "$value" | as_root tee -a "$file" >/dev/null
   fi
+}
+
+env_has_key() {
+  local key="$1"
+  local file="$2"
+  grep -Eq "^[[:space:]]*${key}[[:space:]]*=" "$file"
+}
+
+nvidia_gpu_detected() {
+  command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1
 }
 
 trap 'die "failed on line $LINENO"' ERR
@@ -165,15 +169,24 @@ else
 fi
 if [[ "$CREATED_ENV_FROM_EXAMPLE" == "1" ]]; then
   as_root sed -i -E "s|^[#[:space:]]*HF_HOME=.*|HF_HOME=${APP_DIR}/hf-cache|" "$APP_DIR/.env"
+  if nvidia_gpu_detected; then
+    as_root sed -i -E "s|^[#[:space:]]*AIRLLM_DEVICE=.*|AIRLLM_DEVICE=cuda:0|" "$APP_DIR/.env"
+  fi
 fi
 append_env_if_missing "HF_HOME" "$APP_DIR/hf-cache" "$APP_DIR/.env"
 append_env_if_missing "AIRLLM_LAYER_SHARDS_PATH" "$APP_DIR/shards" "$APP_DIR/.env"
-append_env_if_missing "AIRLLM_DEVICE" "cpu" "$APP_DIR/.env"
+if ! env_has_key "AIRLLM_DEVICE" "$APP_DIR/.env"; then
+  if nvidia_gpu_detected; then
+    append_env_if_missing "AIRLLM_DEVICE" "cuda:0" "$APP_DIR/.env"
+  else
+    append_env_if_missing "AIRLLM_DEVICE" "cpu" "$APP_DIR/.env"
+  fi
+fi
 as_root chown "${SERVICE_USER}:${SERVICE_GROUP}" "$APP_DIR/.env"
 as_root chmod 0600 "$APP_DIR/.env"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
-  note "nvidia-smi found. To use CUDA, set AIRLLM_DEVICE=cuda:0 in $APP_DIR/.env."
+  note "nvidia-smi found. CUDA torch will be installed after the API venv is created."
 else
   note "no nvidia-smi found; leaving AIRLLM_DEVICE=cpu for RAM-based layer swapping"
 fi
@@ -186,12 +199,11 @@ if [[ "$INSTALL_API_SERVICE" == "1" ]]; then
     SERVICE_USER="$SERVICE_USER" \
     SERVICE_GROUP="$SERVICE_GROUP" \
     PYTHON_BIN="$PYTHON_BIN" \
+    INSTALL_CUDA_TORCH="$INSTALL_CUDA_TORCH" \
+    INSTALL_BITSANDBYTES="$INSTALL_BITSANDBYTES" \
+    TORCH_CUDA_INDEX_URL="$TORCH_CUDA_INDEX_URL" \
     "$REPO_DIR/airllm-ollama-api-install.sh"
 
-  if [[ "$INSTALL_BITSANDBYTES" == "1" ]]; then
-    note "installing bitsandbytes into $APP_DIR/venv"
-    as_service_user "$APP_DIR/venv/bin/pip" install bitsandbytes
-  fi
 else
   note "skipping service install because INSTALL_API_SERVICE=$INSTALL_API_SERVICE"
 fi

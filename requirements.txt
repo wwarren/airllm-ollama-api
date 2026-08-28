@@ -13,7 +13,6 @@ fastapi>=0.110.0
 uvicorn[standard]>=0.29.0
 pydantic>=2.6.0
 
-# Only needed if you set AIRLLM_COMPRESSION=4bit or 8bit.
-# bitsandbytes is CUDA-first; verify it works on your CPU-only host before
-# relying on it.
+# Only needed if you set AIRLLM_COMPRESSION=4bit or 8bit. The system
+# bootstrapper installs this automatically on NVIDIA hosts.
 # bitsandbytes>=0.43.0

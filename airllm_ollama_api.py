@@ -62,13 +62,13 @@ def _env_int(name: str, default: int) -> int:
 
 @dataclass
 class Config:
-    # Which model AirLLM loads. The default is small and ungated so you can
-    # validate the wrapper before committing to a 70B download.
+    # Which model AirLLM loads. Defaults to the intended large local model;
+    # override this when you want a smaller smoke-test model.
     model_id: str = field(
-        default_factory=lambda: os.getenv("AIRLLM_MODEL_ID", "Qwen/Qwen2.5-3B-Instruct")
+        default_factory=lambda: os.getenv("AIRLLM_MODEL_ID", "Qwen/Qwen2.5-72B-Instruct")
     )
     # The name clients see. Defaults to model_id; set it if you want a
-    # "llama3:70b"-style entry in Open WebUI's model picker.
+    # "qwen2.5:72b"-style entry in Open WebUI's model picker.
     model_alias: str = field(default_factory=lambda: os.getenv("AIRLLM_MODEL_ALIAS", ""))
 
     # AirLLMBaseModel.__init__ defaults to device="cuda:0", so for RAM-based

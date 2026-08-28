@@ -15,6 +15,7 @@ a background model load so clients can connect while weights are still arriving.
 | File | Purpose |
 | --- | --- |
 | `airllm_ollama_api.py` | The API. Runs standalone (`python airllm_ollama_api.py`) or under systemd. |
+| `proxmox-lxc-install.sh` | Proxmox VE host-side LXC creator that runs the system installer inside the container. |
 | `airllm-system-install.sh` | One-shot Linux host bootstrap: OS packages, service user, caches, then API install. |
 | `airllm-ollama-api-install.sh` | Installs to `/opt/airllm-ollama-api` in a venv and registers the service. |
 | `requirements.txt` | Pinned floor versions for the inference and HTTP stack. |
@@ -42,6 +43,27 @@ dedicated `airllm` service account, prepares `HF_HOME` and
 `airllm-ollama-api-install.sh`. Override paths and names the same way:
 `APP_DIR=... SERVICE_USER=... ./airllm-system-install.sh`.
 
+If `nvidia-smi` sees an NVIDIA GPU, the bootstrapper sets a new `.env` to
+`AIRLLM_DEVICE=cuda:0`. The API installer then installs a CUDA-enabled `torch`
+wheel into `/opt/airllm-ollama-api/venv`, verifies
+`torch.cuda.is_available()`, and installs `bitsandbytes` for 4-bit/8-bit
+compression before starting the service. Disable those with
+`INSTALL_CUDA_TORCH=0` or `INSTALL_BITSANDBYTES=0`; change the PyTorch wheel
+index with `TORCH_CUDA_INDEX_URL=...` when you need a different CUDA build.
+
+On a Proxmox VE node, create an LXC container and install the service into it:
+
+```bash
+./proxmox-lxc-install.sh
+```
+
+It prompts for the LXC template, VMID, hostname, CPU cores, RAM, swap, network,
+container-enabled storage target, and root disk size. It then creates and
+starts the container, copies this repo into the guest, and runs
+`airllm-system-install.sh` inside the container. Defaults can be overridden
+with environment variables such as `DEFAULT_CORES=8`, `DEFAULT_MEMORY_MB=65536`,
+`DEFAULT_DISK_GB=500`, `DEFAULT_NET=...`, and `APP_DIR=...`.
+
 That registers **`airllm-ollama-api.service`**, installed under
 `/opt/airllm-ollama-api`. `systemctl status airllm-ollama-api` describes it as
 "Ollama-compatible HTTP API served by AirLLM" with the port it's listening on,
@@ -67,8 +89,9 @@ and leaves your `.env` alone.
 
 The last step verifies the install rather than assuming it worked: it confirms
 the unit is active, polls `/api/version` until the HTTP server answers (up to
-60s), prints `/health` so you can see whether the weights are still loading,
-and shows `systemctl status`. If any of that fails it dumps the last 40 journal
+60s), posts `/api/pull` to initiate the configured model download/sharding,
+prints `/health` so you can see whether the weights are still loading, and
+shows `systemctl status`. If any of that fails it dumps the last 40 journal
 lines and exits non-zero.
 
 ```
@@ -76,6 +99,8 @@ lines and exits non-zero.
   unit is active
   waiting for the API on 127.0.0.1:11434 
   /api/version -> {"version":"0.32.15"}
+  initiating model download/sharding for Qwen/Qwen2.5-72B-Instruct
+  /api/pull    -> {"status":"success"}
   /health      -> {"status":"loading", ...}
 ```
 
@@ -92,12 +117,13 @@ set -a; source .env; set +a
 Everything is environment variables; `env.example` is the full list. The four
 that matter most:
 
-- **`AIRLLM_MODEL_ID`** — defaults to `Qwen/Qwen2.5-3B-Instruct`. Start there.
-  Validate that your client connects and streams, *then* switch to
-  `meta-llama/Meta-Llama-3-70B-Instruct`. Debugging a wrapper at one token per
-  minute is miserable.
-- **`AIRLLM_DEVICE`** — defaults to `cpu`. AirLLM's own default is `cuda:0`, so
-  this has to be set explicitly for RAM-based swapping.
+- **`AIRLLM_MODEL_ID`** — defaults to `Qwen/Qwen2.5-72B-Instruct`. Set this to
+  a smaller Qwen model before installing if you want a quick smoke test instead
+  of beginning the large first download immediately.
+- **`AIRLLM_DEVICE`** — defaults to `cpu`, except `airllm-system-install.sh`
+  uses `cuda:0` for a new `.env` when `nvidia-smi` detects an NVIDIA GPU.
+  AirLLM's own default is `cuda:0`, so this has to be set explicitly for
+  RAM-based swapping.
 - **`AIRLLM_MAX_SEQ_LEN`** — defaults to 2048. AirLLM's internal default is
   **512**, which silently truncates longer prompts.
 - **`HF_TOKEN`** — required for gated repos. Llama 3 is gated; without a token
@@ -141,7 +167,7 @@ before a 70B produces its first token.
 **LiteLLM** — use the `ollama_chat/` prefix, which maps onto `/api/chat`:
 
 ```python
-completion(model="ollama_chat/Qwen/Qwen2.5-3B-Instruct",
+completion(model="ollama_chat/Qwen/Qwen2.5-72B-Instruct",
            api_base="http://localhost:11434",
            messages=[{"role": "user", "content": "hi"}])
 ```
@@ -187,9 +213,10 @@ time, and that abandoning a stream actually cancels the model.
   `loading`, `ready`, or `error`.
 - Requests return **503** while the model is still loading, not a hang. Tune
   `AIRLLM_LOAD_WAIT`.
-- **`AIRLLM_COMPRESSION=4bit`** needs `bitsandbytes`, which is CUDA-first.
-  Verify it works on a CPU-only host before depending on it; unset is the
-  safe default.
+- **`AIRLLM_COMPRESSION=4bit`** needs `bitsandbytes`. The system bootstrapper
+  installs it automatically when an NVIDIA GPU is detected; force it with
+  `INSTALL_BITSANDBYTES=1` or skip it with `INSTALL_BITSANDBYTES=0`. Unset
+  compression is the safe default.
 - The unit uses `Restart=on-failure` with `StartLimitBurst=5`, so a
   misconfiguration (bad model ID, missing token) stops after five attempts
   instead of re-downloading weights forever.
