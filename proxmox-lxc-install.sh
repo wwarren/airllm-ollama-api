@@ -14,9 +14,15 @@ DEFAULT_MEMORY_MB="${DEFAULT_MEMORY_MB:-32768}"
 DEFAULT_SWAP_MB="${DEFAULT_SWAP_MB:-4096}"
 DEFAULT_DISK_GB="${DEFAULT_DISK_GB:-300}"
 DEFAULT_BRIDGE="${DEFAULT_BRIDGE:-vmbr0}"
-DEFAULT_NET="${DEFAULT_NET:-name=eth0,bridge=${DEFAULT_BRIDGE},ip=dhcp}"
+DEFAULT_NETWORK_MODE="${DEFAULT_NETWORK_MODE:-static}"
+DEFAULT_IP_ADDRESS="${DEFAULT_IP_ADDRESS:-}"
+DEFAULT_SUBNET="${DEFAULT_SUBNET:-24}"
+DEFAULT_GATEWAY="${DEFAULT_GATEWAY:-}"
+DEFAULT_DNS="${DEFAULT_DNS:-}"
 DEFAULT_OS_TYPE="${DEFAULT_OS_TYPE:-auto}"
 DEFAULT_FEATURES="${DEFAULT_FEATURES:-nesting=1,keyctl=1}"
+NETWORK_WAIT_SECONDS="${NETWORK_WAIT_SECONDS:-180}"
+ALLOW_UNSTABLE_APT_RELEASE="${ALLOW_UNSTABLE_APT_RELEASE:-0}"
 START_CONTAINER="${START_CONTAINER:-1}"
 UNPRIVILEGED="${UNPRIVILEGED:-1}"
 INSTALL_IN_CONTAINER="${INSTALL_IN_CONTAINER:-1}"
@@ -51,6 +57,19 @@ prompt_secret() {
   printf '\n' >&2
   [[ -n "$value" ]] || die "$label is required"
   printf '%s' "$value"
+}
+
+prompt_optional() {
+  local label="$1"
+  local default="$2"
+  local value
+  if [[ -n "$default" ]]; then
+    printf '%s [%s]: ' "$label" "$default" >&2
+  else
+    printf '%s: ' "$label" >&2
+  fi
+  read -r value
+  printf '%s' "${value:-$default}"
 }
 
 prompt_yes_no() {
@@ -97,6 +116,63 @@ validate_int() {
   (( value > 0 )) || die "$label must be greater than zero"
 }
 
+subnet_to_prefix() {
+  local subnet="$1"
+  local IFS=.
+  local -a octets
+  local octet bit prefix=0 seen_zero=0
+
+  if [[ "$subnet" =~ ^[0-9]+$ ]]; then
+    (( subnet >= 1 && subnet <= 32 )) || die "subnet prefix must be between 1 and 32, got: $subnet"
+    printf '%s' "$subnet"
+    return
+  fi
+
+  read -r -a octets <<< "$subnet"
+  [[ ${#octets[@]} -eq 4 ]] || die "subnet mask must be CIDR bits or dotted quad, got: $subnet"
+  for octet in "${octets[@]}"; do
+    [[ "$octet" =~ ^[0-9]+$ ]] || die "subnet mask has a non-numeric octet: $subnet"
+    (( octet >= 0 && octet <= 255 )) || die "subnet mask octet out of range: $subnet"
+    for bit in 128 64 32 16 8 4 2 1; do
+      if (( octet & bit )); then
+        (( seen_zero == 0 )) || die "subnet mask must be contiguous, got: $subnet"
+        prefix=$((prefix + 1))
+      else
+        seen_zero=1
+      fi
+    done
+  done
+  (( prefix >= 1 && prefix <= 32 )) || die "subnet prefix must be between 1 and 32, got: $prefix"
+  printf '%s' "$prefix"
+}
+
+build_network_config() {
+  local mode bridge ip_address subnet prefix gateway net0
+  case "${DEFAULT_NETWORK_MODE,,}" in
+    static) mode="$(prompt_choice "Network mode" "static" "dhcp")" ;;
+    dhcp) mode="$(prompt_choice "Network mode" "dhcp" "static")" ;;
+    *) die "DEFAULT_NETWORK_MODE must be static or dhcp, got: $DEFAULT_NETWORK_MODE" ;;
+  esac
+  bridge="$(prompt "Bridge" "$DEFAULT_BRIDGE")"
+
+  case "${mode,,}" in
+    dhcp)
+      printf 'name=eth0,bridge=%s,ip=dhcp' "$bridge"
+      ;;
+    static)
+      ip_address="$(prompt "IP address" "$DEFAULT_IP_ADDRESS")"
+      subnet="$(prompt "Subnet mask or CIDR prefix" "$DEFAULT_SUBNET")"
+      gateway="$(prompt "Default gateway" "$DEFAULT_GATEWAY")"
+      prefix="$(subnet_to_prefix "$subnet")"
+      net0="name=eth0,bridge=${bridge},ip=${ip_address}/${prefix},gw=${gateway}"
+      printf '%s' "$net0"
+      ;;
+    *)
+      die "unsupported network mode: $mode"
+      ;;
+  esac
+}
+
 require_root() {
   [[ $EUID -eq 0 ]] || die "run this script as root on a Proxmox VE node"
 }
@@ -116,7 +192,7 @@ list_container_storage() {
 template_volume_exists() {
   local template="$1"
   [[ -f "/var/lib/vz/template/cache/$template" ]] && return 0
-  pvesm list local --content vztmpl 2>/dev/null | awk 'NR > 1 {print $1}' | grep -Fxq "local:vztmpl/$template"
+  pvesm list --content vztmpl 2>/dev/null | awk 'NR > 1 {print $1}' | grep -Eq "(^|:)vztmpl/${template}$"
 }
 
 ensure_template_available() {
@@ -125,7 +201,7 @@ ensure_template_available() {
     note "template is already available: $template"
   else
     note "downloading template: $template"
-    pveam download local "$template"
+    pveam download local "$template" >&2
   fi
   printf 'local:vztmpl/%s' "$template"
 }
@@ -154,6 +230,18 @@ ostype_for_template() {
   esac
 }
 
+warn_about_template() {
+  local template="$1"
+  case "$template" in
+    *resolute*|*ubuntu-26.10*|*ubuntu-26-10*)
+      printf '\nWARNING: %s appears to be an Ubuntu development/new-release template.\n' "$template" >&2
+      printf 'Its apt repositories may not have normal Release files yet. For a reliable\n' >&2
+      printf 'AirLLM install, use an Ubuntu LTS or Debian template.\n\n' >&2
+      prompt_yes_no "Continue with this template anyway?" "no" || die "aborted"
+      ;;
+  esac
+}
+
 wait_for_container_systemd() {
   local vmid="$1"
   local timeout="${2:-180}"
@@ -176,6 +264,28 @@ wait_for_container_systemd() {
   die "container systemd did not become ready within ${timeout}s"
 }
 
+wait_for_container_network() {
+  local vmid="$1"
+  local timeout="${2:-$NETWORK_WAIT_SECONDS}"
+  local elapsed=0
+  printf '  waiting for outbound network in CT %s ' "$vmid"
+  while (( elapsed < timeout )); do
+    if pct exec "$vmid" -- sh -c 'ip route show default 2>/dev/null | grep -q . && getent hosts archive.ubuntu.com >/dev/null 2>&1' >/dev/null 2>&1; then
+      printf '\n'
+      return 0
+    fi
+    if pct exec "$vmid" -- sh -c 'ip route show default 2>/dev/null | grep -q . && getent hosts deb.debian.org >/dev/null 2>&1' >/dev/null 2>&1; then
+      printf '\n'
+      return 0
+    fi
+    printf '.'
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+  printf '\n'
+  die "container has no usable default route/DNS after ${timeout}s. Check the selected net0 config, bridge, DHCP, gateway, and DNS before running the AirLLM installer."
+}
+
 copy_repo_into_container() {
   local vmid="$1"
   note "copying repo into CT $vmid:$CONTAINER_SRC_DIR"
@@ -196,6 +306,7 @@ run_airllm_install() {
     APP_DIR="$APP_DIR" \
     SERVICE_USER=airllm \
     SERVICE_GROUP=airllm \
+    ALLOW_UNSTABLE_APT_RELEASE="$ALLOW_UNSTABLE_APT_RELEASE" \
     "$CONTAINER_SRC_DIR/airllm-system-install.sh"
 }
 
@@ -215,6 +326,7 @@ mapfile -t storages < <(list_container_storage)
 [[ ${#storages[@]} -gt 0 ]] || die "no Proxmox storage with rootdir content is enabled"
 
 template="$(prompt_choice "Available LXC templates" "${templates[@]}")"
+warn_about_template "$template"
 ostype="$(ostype_for_template "$template")"
 vmid="$(prompt "Container VMID" "$(next_vmid)")"
 hostname="$(prompt "Hostname" "$DEFAULT_HOSTNAME")"
@@ -223,7 +335,8 @@ memory_mb="$(prompt "RAM in MB" "$DEFAULT_MEMORY_MB")"
 swap_mb="$(prompt "Swap in MB" "$DEFAULT_SWAP_MB")"
 storage="$(prompt_choice "Container-enabled storage targets" "${storages[@]}")"
 disk_gb="$(prompt "Root disk size in GB" "$DEFAULT_DISK_GB")"
-net0="$(prompt "Network config" "$DEFAULT_NET")"
+net0="$(build_network_config)"
+nameserver="$(prompt_optional "DNS server (blank to skip)" "$DEFAULT_DNS")"
 password="$(prompt_secret "Root password for the container")"
 
 validate_int "Container VMID" "$vmid"
@@ -237,6 +350,9 @@ if pct status "$vmid" >/dev/null 2>&1; then
 fi
 
 template_volume="$(ensure_template_available "$template")"
+if (( ${#template_volume} > 255 )); then
+  die "template volume is unexpectedly long; got: $template_volume"
+fi
 
 cat <<SUMMARY
 
@@ -249,6 +365,7 @@ About to create:
   Swap      : ${swap_mb}MB
   Storage   : ${storage}:${disk_gb}GB
   Network   : $net0
+  DNS       : ${nameserver:-container default}
   OS type   : $ostype
   Unpriv    : $UNPRIVILEGED
 
@@ -256,18 +373,24 @@ SUMMARY
 
 prompt_yes_no "Create this container?" "yes" || die "aborted"
 
-pct create "$vmid" "$template_volume" \
-  --hostname "$hostname" \
-  --cores "$cores" \
-  --memory "$memory_mb" \
-  --swap "$swap_mb" \
-  --rootfs "${storage}:${disk_gb}" \
-  --net0 "$net0" \
-  --ostype "$ostype" \
-  --features "$DEFAULT_FEATURES" \
-  --unprivileged "$UNPRIVILEGED" \
-  --password "$password" \
+create_args=(
+  create "$vmid" "$template_volume"
+  --hostname "$hostname"
+  --cores "$cores"
+  --memory "$memory_mb"
+  --swap "$swap_mb"
+  --rootfs "${storage}:${disk_gb}"
+  --net0 "$net0"
+  --ostype "$ostype"
+  --features "$DEFAULT_FEATURES"
+  --unprivileged "$UNPRIVILEGED"
+  --password "$password"
   --start "$START_CONTAINER"
+)
+if [[ -n "$nameserver" ]]; then
+  create_args+=(--nameserver "$nameserver")
+fi
+pct "${create_args[@]}"
 
 if [[ "$START_CONTAINER" != "1" ]]; then
   note "starting CT $vmid"
@@ -275,6 +398,7 @@ if [[ "$START_CONTAINER" != "1" ]]; then
 fi
 
 wait_for_container_systemd "$vmid"
+wait_for_container_network "$vmid"
 
 if [[ "$INSTALL_IN_CONTAINER" == "1" ]]; then
   copy_repo_into_container "$vmid"

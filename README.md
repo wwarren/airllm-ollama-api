@@ -57,12 +57,19 @@ On a Proxmox VE node, create an LXC container and install the service into it:
 ./proxmox-lxc-install.sh
 ```
 
-It prompts for the LXC template, VMID, hostname, CPU cores, RAM, swap, network,
-container-enabled storage target, and root disk size. It then creates and
+It prompts for the LXC template, VMID, hostname, CPU cores, RAM, swap,
+container-enabled storage target, root disk size, and network settings. Static
+networking is the default: it asks for IP address, subnet mask or CIDR prefix,
+and default gateway. DHCP is available as a menu option. It then creates and
 starts the container, copies this repo into the guest, and runs
 `airllm-system-install.sh` inside the container. Defaults can be overridden
 with environment variables such as `DEFAULT_CORES=8`, `DEFAULT_MEMORY_MB=65536`,
-`DEFAULT_DISK_GB=500`, `DEFAULT_NET=...`, and `APP_DIR=...`.
+`DEFAULT_DISK_GB=500`, `DEFAULT_IP_ADDRESS=192.168.1.50`,
+`DEFAULT_SUBNET=24`, `DEFAULT_GATEWAY=192.168.1.1`, and `APP_DIR=...`.
+Use an Ubuntu LTS or Debian template for the smoothest install; development
+templates such as Ubuntu `resolute` may not have stable apt Release files yet.
+The installer waits for a default route and DNS in the container before it
+starts package installation.
 
 That registers **`airllm-ollama-api.service`**, installed under
 `/opt/airllm-ollama-api`. `systemctl status airllm-ollama-api` describes it as
